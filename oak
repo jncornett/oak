@@ -1,0 +1,121 @@
+#!/bin/bash
+
+TREE_EXECUTABLE_NAME="${TREE_EXECUTABLE_NAME:-tree}"
+# TREE_EXECUTABLE_PATH
+TREE_FILE_LIMIT="${TREE_FILE_LIMIT:-20}"
+
+USAGE="usage: $(basename $0) [-h] [-uad] [-L level] [dir]..."
+read -d '' HELP <<EOF
+${USAGE}
+  -u --skip-vcs-ignores		don't look in .gitignore files for ignore patterns
+  -a --all			include hidden files and directories in the listing
+  -d --dirs			only list directories
+  -L --level LEVEL		only recurse up to LEVEL levels
+  -h --help			print this help and exit
+EOF
+
+declare -a __vcs_ignores
+
+declare -A __escapes
+if [ -t 1 ]; then
+  __escapes=(
+    [fatal]="\e[47;31m"
+    [error]="\e[31m"
+    [warning]="\e[33m"
+    [info]="\e[32m"
+    [debug]="\e[34m"
+    [reset]="\e[0m"
+  )
+fi
+
+log() {
+  local level=$1; shift
+  echo -e "[ ${__escapes[$level]}$level${__escapes[reset]} ]" "$@" >&2
+}
+
+die() { log fatal "$@"; exit 1; }
+
+abs_path() {
+  pushd "$1" >/dev/null && {
+    echo "$PWD"
+    popd >/dev/null
+  }
+}
+
+# supports only git for now
+find_vcs_ignore_file() {
+  local cur_dir="$(abs_path "$1")"
+  while [[ "$cur_dir" != "/" ]] && [[ "$cur_dir" != "$HOME" ]]; do
+    if [[ -f "$cur_dir/.gitignore" ]]; then
+      echo "$cur_dir/.gitignore"
+      return 0
+    fi
+    cur_dir="$(dirname "$cur_dir")"
+  done
+
+  return 1
+}
+
+do_help() {
+  echo "$HELP" >&2
+  exit 0
+}
+
+do_usage() {
+  local unrecognized="$1"; shift
+  echo "$USAGE" >&2
+  die "'$1' is not a valid parameter"
+}
+
+
+main() {
+  local tree_executable skip_vcs_ignores target_path
+  local -a pos_args
+  local -a tree_args=( -x --filelimit "${TREE_FILE_LIMIT}" -p -s -u -g -h -F --du -D )
+
+  [ -t 1 ] && tree_args+=( -C )
+
+  while (( $# )); do
+    case "$1" in
+      -u|--skip-vcs-ignores) skip_vcs_ignores=1;;
+      -a|--all) tree_args+=( -a );;
+      -d|--dirs) tree_args+=( -d );;
+      -L|--level) tree_args+=( -L "$2" ); shift;;
+      -h|--help) do_help;;
+      --) shift; break;;
+      -*) do_usage;;
+      *) pos_args+=( "$1" );;
+    esac
+    shift
+  done
+
+  target_path="${pos_args[0]}"
+  [[ -z "$target_path" ]] && target_path="."
+
+  tree_executable="$TREE_EXECUTABLE_PATH"
+  if [[ -z "$tree_executable" ]]; then
+    tree_executable=$(which "$TREE_EXECUTABLE_NAME") || die "could not locate \`$TREE_EXECUTABLE_NAME\` command. is it installed?"
+  fi
+
+  [[ -x "$tree_executable" ]] || die "'$tree_executable' is not a valid executable file"
+
+  if [[ -z "$skip_vcs_ignores" ]]; then
+    local vcs_ignore_path="$(find_vcs_ignore_file "$target_path")"
+    if [[ -n "$vcs_ignore_path" ]]; then
+      local vcs_root="$(dirname "$vcs_ignore_path")" ignore_line
+      local vcs_ignore_pattern
+      for ignore_line in $(cat "$vcs_ignore_path"); do
+        case "$ignore_line" in
+          /*) vcs_ignore_pattern="${vcs_ignore_pattern}|${vcs_root}/${ignore_line%/}";;
+          *) vcs_ignore_pattern="${vcs_ignore_pattern}|${ignore_line%/}|*/${ignore_line%/}" ;;
+        esac
+      done
+
+      tree_args+=( -I "${vcs_ignore_pattern#|}" )
+    fi
+  fi
+
+  "${tree_executable}" "${tree_args[@]}" "${target_path}"
+}
+
+main "$@"
